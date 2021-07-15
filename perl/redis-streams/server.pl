@@ -21,16 +21,18 @@ my $redis = Net::Async::Redis->new(port => PORT);
 $loop->add($redis);
 
 async sub main {
+    my $key = shift // '$';
     try {
         my $res = await $redis->xread(
-            COUNT => 1,
+            COUNT => 10,
             BLOCK => 0,
-            STREAMS => $stream_name, '$');
+            STREAMS => $stream_name, $key);
         p $res, as => 'Response: ';
+        $key = $res->[0][1][-1][0];
     } catch ($e) {
         p $e;
     }
-    main()->retain();
+    main($key)->retain();
 }
 
 main()->retain;
