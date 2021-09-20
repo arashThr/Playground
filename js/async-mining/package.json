@@ -1,0 +1,15 @@
+{
+  "name": "async-mining",
+  "version": "1.0.0",
+  "description": "",
+  "main": "terminal-improved.mjs",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node terminal-improved.mjs"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "terminal-kit": "^2.1.6"
+  }
+}
