@@ -109,3 +109,38 @@ func addReviewer(db *sql.DB, messageTS string, reviewerID string) error {
 		newReviewersStr, messageTS)
 	return err
 }
+
+// Add these database functions
+func getPendingPRs(db *sql.DB) ([]PRReview, error) {
+	query := `
+        SELECT id, pr_url, description, channel_id, message_ts, reviewers, created_at 
+        FROM pr_reviews 
+        WHERE status = 'pending'`
+
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var prs []PRReview
+	for rows.Next() {
+		var pr PRReview
+		var reviewersStr string
+		err := rows.Scan(
+			&pr.ID,
+			&pr.PRUrl,
+			&pr.Description,
+			&pr.ChannelID,
+			&pr.MessageTS,
+			&reviewersStr,
+			&pr.CreatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		pr.Reviewers = strings.Split(reviewersStr, ",")
+		prs = append(prs, pr)
+	}
+	return prs, nil
+}

@@ -34,6 +34,8 @@ func main() {
 		log.Fatal("Error initializing database:", err)
 	}
 
+	startReminderSystem(api, db)
+
 	// Keep your existing /slack/commands handler
 	http.HandleFunc("/slack/commands", handleSlashCommand(api))
 
