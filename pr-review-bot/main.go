@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,19 +29,24 @@ func main() {
 
 	api := slack.New(token)
 
+	db, err := initDB()
+	if err != nil {
+		log.Fatal("Error initializing database:", err)
+	}
+
 	// Keep your existing /slack/commands handler
 	http.HandleFunc("/slack/commands", handleSlashCommand(api))
 
 	// Add new handler for interactions (modal submissions)
-	http.HandleFunc("/slack/interactivity", handleInteractivity(api))
+	http.HandleFunc("/slack/interactivity", handleInteractivity(api, db))
 
-	http.HandleFunc("/slack/events", handleEvents(api))
+	http.HandleFunc("/slack/events", handleEvents(api, db))
 
 	log.Println("Server starting on :8080")
 	log.Fatal(http.ListenAndServe("127.0.0.1:8080", nil))
 }
 
-func handleInteractivity(api *slack.Client) http.HandlerFunc {
+func handleInteractivity(api *slack.Client, db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var payload slack.InteractionCallback
 		err := json.Unmarshal([]byte(r.FormValue("payload")), &payload)
@@ -115,7 +121,7 @@ func handleInteractivity(api *slack.Client) http.HandlerFunc {
 			)
 
 			// Post message to channel
-			_, _, err := api.PostMessage(
+			_, respTimestamp, err := api.PostMessage(
 				// payload.User.ID, // DM to user who submitted
 				channelID,
 				slack.MsgOptionBlocks(blocks...),
@@ -123,6 +129,22 @@ func handleInteractivity(api *slack.Client) http.HandlerFunc {
 			)
 			if err != nil {
 				log.Printf("Error posting message: %v", err)
+			}
+
+			// Store in database
+			pr := &PRReview{
+				PRUrl:       values["pr_url_block"]["pr_url"].Value,
+				Description: values["description_block"]["description"].Value,
+				ChannelID:   channelID,
+				MessageTS:   respTimestamp,
+				Reviewers:   values["reviewers_block"]["reviewers"].SelectedUsers,
+				Status:      "pending",
+			}
+
+			if err := storePRReview(db, pr); err != nil {
+				log.Printf("Error storing PR review: %v", err)
+			} else {
+				log.Printf("PR review stored in database: %v", pr.PRUrl)
 			}
 		}
 
@@ -213,7 +235,7 @@ func handleSlashCommand(api *slack.Client) http.HandlerFunc {
 	}
 }
 
-func handleEvents(api *slack.Client) http.HandlerFunc {
+func handleEvents(api *slack.Client, db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body := make(map[string]interface{})
 		rawBody, err := io.ReadAll(r.Body)
@@ -257,11 +279,23 @@ func handleEvents(api *slack.Client) http.HandlerFunc {
 			}
 			switch reaction.Reaction {
 			case "eyes":
+				// Add user to reviewers list
+				err := addReviewer(db, reaction.Item.Timestamp, user.ID)
+				if err != nil {
+					log.Printf("Error updating reviewers: %v", err)
+					return
+				}
 				log.Printf("%s is reviewing the PR", user.RealName)
 
 			case "white_check_mark":
+				// Update database status
+				err := updatePRStatus(db, reaction.Item.Timestamp, "approved", user.ID)
+				if err != nil {
+					log.Printf("Error updating PR status: %v", err)
+					return
+				}
 				// Post approval message in thread
-				_, _, err := api.PostMessage(
+				_, _, err = api.PostMessage(
 					reaction.Item.Channel,
 					slack.MsgOptionText(fmt.Sprintf("✅ PR approved by %s", user.RealName), false),
 					slack.MsgOptionTS(reaction.Item.Timestamp), // This creates a thread
