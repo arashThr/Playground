@@ -22,33 +22,38 @@ func main() {
 		log.Fatal("Load .env file error")
 	}
 
-	token := os.Getenv("SLACK_BOT_TOKEN")
-	if token == "" {
-		log.Fatal("SLACK_BOT_TOKEN is required")
-	}
-
-	api := slack.New(token)
-
 	db, err := initDB()
 	if err != nil {
 		log.Fatal("Error initializing database:", err)
 	}
+	defer db.Close()
 
-	startReminderSystem(api, db)
+	oauthConfig := OAuthConfig{
+		ClientID:     os.Getenv("SLACK_CLIENT_ID"),
+		ClientSecret: os.Getenv("SLACK_CLIENT_SECRET"),
+		RedirectURL:  os.Getenv("SLACK_REDIRECT_URL"),
+	}
+
+	startReminderSystem(db)
+
+	http.HandleFunc("/", handleMainPage())
+
+	// OAuth endpoints
+	http.HandleFunc("/slack/oauth", handleOAuth(db, oauthConfig))
 
 	// Keep your existing /slack/commands handler
-	http.HandleFunc("/slack/commands", handleSlashCommand(api))
+	http.HandleFunc("/slack/commands", handleSlashCommand(db))
 
 	// Add new handler for interactions (modal submissions)
-	http.HandleFunc("/slack/interactivity", handleInteractivity(api, db))
+	http.HandleFunc("/slack/interactivity", handleInteractivity(db))
 
-	http.HandleFunc("/slack/events", handleEvents(api, db))
+	http.HandleFunc("/slack/events", handleEvents(db))
 
 	log.Println("Server starting on :8080")
 	log.Fatal(http.ListenAndServe("127.0.0.1:8080", nil))
 }
 
-func handleInteractivity(api *slack.Client, db *sql.DB) http.HandlerFunc {
+func handleInteractivity(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var payload slack.InteractionCallback
 		err := json.Unmarshal([]byte(r.FormValue("payload")), &payload)
@@ -100,6 +105,13 @@ func handleInteractivity(api *slack.Client, db *sql.DB) http.HandlerFunc {
 				),
 			)
 
+			// Get workspace-specific token
+			api, err := getApi(db, payload.Team.ID)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+
 			// Post message to channel
 			_, respTimestamp, err := api.PostMessage(
 				// payload.User.ID, // DM to user who submitted
@@ -118,6 +130,7 @@ func handleInteractivity(api *slack.Client, db *sql.DB) http.HandlerFunc {
 				ChannelID:   channelID,
 				MessageTS:   respTimestamp,
 				Reviewers:   values["reviewers_block"]["reviewers"].SelectedUsers,
+				TeamId:      payload.Team.ID,
 				Status:      "pending",
 			}
 
@@ -132,12 +145,37 @@ func handleInteractivity(api *slack.Client, db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handleSlashCommand(api *slack.Client) http.HandlerFunc {
+func handleMainPage() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		html := `
+        <html>
+            <body>
+                <h1>PR Review Bot</h1>
+                <a href="/slack/oauth"><img alt="Add to Slack" 
+                    height="40" width="139" 
+                    src="https://platform.slack-edge.com/img/add_to_slack.png" 
+                    srcset="https://platform.slack-edge.com/img/add_to_slack.png 1x, 
+                            https://platform.slack-edge.com/img/add_to_slack@2x.png 2x"/></a>
+            </body>
+        </html>`
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(html))
+	}
+}
+
+func handleSlashCommand(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		s, err := slack.SlashCommandParse(r)
 		if err != nil {
 			log.Printf("Error parsing slash command: %v", err)
 			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		// Get workspace-specific token
+		api, err := getApi(db, s.TeamID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
@@ -215,7 +253,7 @@ func handleSlashCommand(api *slack.Client) http.HandlerFunc {
 	}
 }
 
-func handleEvents(api *slack.Client, db *sql.DB) http.HandlerFunc {
+func handleEvents(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body := make(map[string]interface{})
 		rawBody, err := io.ReadAll(r.Body)
@@ -251,41 +289,62 @@ func handleEvents(api *slack.Client, db *sql.DB) http.HandlerFunc {
 		}
 
 		innerEvent := eventsAPIEvent.InnerEvent
-		if reaction, ok := innerEvent.Data.(*slackevents.ReactionAddedEvent); ok {
-			user, err := api.GetUserInfo(reaction.User)
-			if err != nil {
-				log.Printf("Error getting user info: %v", err)
-				w.WriteHeader(http.StatusInternalServerError)
-			}
-			switch reaction.Reaction {
-			case "eyes":
-				// Add user to reviewers list
-				err := addReviewer(db, reaction.Item.Timestamp, user.ID)
-				if err != nil {
-					log.Printf("Error updating reviewers: %v", err)
-					return
-				}
-				log.Printf("%s is reviewing the PR", user.RealName)
+		reaction, ok := innerEvent.Data.(*slackevents.ReactionAddedEvent)
+		if !ok {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 
-			case "white_check_mark":
-				// Update database status
-				err := updatePRStatus(db, reaction.Item.Timestamp, "approved", user.ID)
-				if err != nil {
-					log.Printf("Error updating PR status: %v", err)
-					return
-				}
-				// Post approval message in thread
-				_, _, err = api.PostMessage(
-					reaction.Item.Channel,
-					slack.MsgOptionText(fmt.Sprintf("✅ PR approved by %s", user.RealName), false),
-					slack.MsgOptionTS(reaction.Item.Timestamp), // This creates a thread
-				)
-				if err != nil {
-					log.Printf("Error posting approval message: %v", err)
-				}
-				log.Printf("%s approved the PR", user.RealName)
+		api, err := getApi(db, eventsAPIEvent.TeamID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		user, err := api.GetUserInfo(reaction.User)
+		if err != nil {
+			log.Printf("Error getting user info: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		switch reaction.Reaction {
+		case "eyes":
+			// Add user to reviewers list
+			err := addReviewer(db, reaction.Item.Timestamp, user.ID)
+			if err != nil {
+				log.Printf("Error updating reviewers: %v", err)
+				return
 			}
+			log.Printf("%s is reviewing the PR", user.RealName)
+
+		case "white_check_mark":
+			// Update database status
+			err := updatePRStatus(db, reaction.Item.Timestamp, "approved", user.ID)
+			if err != nil {
+				log.Printf("Error updating PR status: %v", err)
+				return
+			}
+			// Post approval message in thread
+			_, _, err = api.PostMessage(
+				reaction.Item.Channel,
+				slack.MsgOptionText(fmt.Sprintf("✅ PR approved by %s", user.RealName), false),
+				slack.MsgOptionTS(reaction.Item.Timestamp), // This creates a thread
+			)
+			if err != nil {
+				log.Printf("Error posting approval message: %v", err)
+			}
+			log.Printf("%s approved the PR", user.RealName)
 		}
 		w.WriteHeader(http.StatusOK)
 	}
+}
+
+func getApi(db *sql.DB, teamId string) (*slack.Client, error) {
+	token, err := getWorkspaceToken(db, teamId)
+	if err != nil {
+		log.Printf("Error getting workspace token: %v", err)
+		return nil, err
+	}
+
+	api := slack.New(token)
+	return api, nil
 }

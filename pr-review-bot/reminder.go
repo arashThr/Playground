@@ -12,13 +12,16 @@ import (
 )
 
 // Add the reminder system
-func startReminderSystem(api *slack.Client, db *sql.DB) {
+func startReminderSystem(db *sql.DB) {
 	log.Printf("Starting reminder system")
 	s := gocron.NewScheduler()
 
 	// Run every day at 9 AM
-	// s.Every(1).Day().At("09:00").Do(func() {
-	s.Every(5).Seconds().Do(func() {
+	s.Every(1).Day().At("09:00").Do(func() {
+		// TEST: Check every 10 seconds
+		// > 5 seconds mention candidates
+		// >= 20 seconds, mention channel
+		// s.Every(10).Seconds().Do(func() {
 		log.Printf("Running reminder system")
 		prs, err := getPendingPRs(db)
 		if err != nil {
@@ -27,18 +30,30 @@ func startReminderSystem(api *slack.Client, db *sql.DB) {
 		}
 
 		for _, pr := range prs {
-			// daysSinceCreation := int(time.Since(pr.CreatedAt).Hours() / 24)
-			daysSinceCreation := int(time.Since(pr.CreatedAt).Seconds())
+			daysSinceCreation := int(time.Since(pr.CreatedAt).Hours() / 24)
+			// TEST:
+			// daysSinceCreation := int(time.Since(pr.CreatedAt).Seconds())
 
 			// Skip PRs less than 1 day old
 			if daysSinceCreation < 1 {
 				continue
 			}
+			// TEST:
+			// if daysSinceCreation < 5 {
+			// 	continue
+			// }
+
+			api, err := getApi(db, pr.TeamId)
+			if err != nil {
+				log.Printf("Error getting API in reminder system: %v", err)
+				return
+			}
 
 			var mentionUsers []string
 
+			// After 3 days, mention everyone
 			if daysSinceCreation >= 3 {
-				// After 3 days, mention everyone
+				// TEST: if daysSinceCreation >= 20 {
 				mentionUsers = []string{"<!channel>"}
 			} else {
 				// Get users who reacted with eyes
@@ -74,6 +89,8 @@ func startReminderSystem(api *slack.Client, db *sql.DB) {
 			if len(mentionUsers) > 0 {
 				text += "Hey " + strings.Join(mentionUsers, ", ") + "! "
 				if daysSinceCreation >= 3 {
+					// TEST:
+					// if daysSinceCreation >= 10 {
 					text += "This PR has been waiting for review for 3+ days."
 				} else {
 					text += "This PR is awaiting your review."
