@@ -64,7 +64,6 @@ func handleInteractivity(api *slack.Client, db *sql.DB) http.HandlerFunc {
 			channelID := payload.View.PrivateMetadata
 			prURL := values["pr_url_block"]["pr_url"].Value
 			description := values["description_block"]["description"].Value
-			reviewers := values["reviewers_block"]["reviewers"].SelectedUsers
 
 			// Create message blocks
 			blocks := []slack.Block{
@@ -90,27 +89,6 @@ func handleInteractivity(api *slack.Client, db *sql.DB) http.HandlerFunc {
 					),
 					nil, nil,
 				),
-			}
-
-			// Add reviewers section if any were selected
-			if len(reviewers) > 0 {
-				var mentionText string
-				for i, reviewer := range reviewers {
-					if i > 0 {
-						mentionText += ", "
-					}
-					mentionText += fmt.Sprintf("<@%s>", reviewer)
-				}
-				blocks = append(blocks,
-					slack.NewSectionBlock(
-						slack.NewTextBlockObject(
-							slack.MarkdownType,
-							fmt.Sprintf("*Reviewers:* %s", mentionText),
-							false, false,
-						),
-						nil, nil,
-					),
-				)
 			}
 
 			// Add divider and reaction guide
