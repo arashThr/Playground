@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -11,17 +12,46 @@ import (
 	"github.com/slack-go/slack"
 )
 
+type ReminderSetup struct {
+	scheduler       *gocron.Scheduler
+	cronJob         *gocron.Job
+	startReminder   time.Duration
+	channelReminder time.Duration
+}
+
+func createProdSetup() *ReminderSetup {
+	scheduler := gocron.NewScheduler()
+	return &ReminderSetup{
+		scheduler:       scheduler,
+		cronJob:         scheduler.Every(1).Day().At("09:00"),
+		startReminder:   24 * time.Hour,
+		channelReminder: 3 * 24 * time.Hour,
+	}
+}
+
+func createTestSetup() *ReminderSetup {
+	scheduler := gocron.NewScheduler()
+	return &ReminderSetup{
+		scheduler:       scheduler,
+		cronJob:         scheduler.Every(7).Seconds(),
+		startReminder:   10 * time.Second,
+		channelReminder: 20 * time.Second,
+	}
+}
+
 // Add the reminder system
 func startReminderSystem(db *sql.DB) {
-	log.Printf("Starting reminder system")
-	s := gocron.NewScheduler()
+	isProd := os.Getenv("GO_ENV") == "prod"
+	var reminderSetup *ReminderSetup
+	if isProd {
+		log.Printf("Running in production mode")
+		reminderSetup = createProdSetup()
+	} else {
+		log.Printf("Running in test mode")
+		reminderSetup = createTestSetup()
+	}
 
-	// Run every day at 9 AM
-	s.Every(1).Day().At("09:00").Do(func() {
-		// TEST: Check every 10 seconds
-		// > 5 seconds mention candidates
-		// >= 20 seconds, mention channel
-		// s.Every(10).Seconds().Do(func() {
+	reminderSetup.cronJob.Do(func() {
 		log.Printf("Running reminder system")
 		prs, err := getPendingPRs(db)
 		if err != nil {
@@ -30,18 +60,10 @@ func startReminderSystem(db *sql.DB) {
 		}
 
 		for _, pr := range prs {
-			daysSinceCreation := int(time.Since(pr.CreatedAt).Hours() / 24)
-			// TEST:
-			// daysSinceCreation := int(time.Since(pr.CreatedAt).Seconds())
-
-			// Skip PRs less than 1 day old
-			if daysSinceCreation < 1 {
+			sinceCreation := time.Since(pr.CreatedAt)
+			if sinceCreation < reminderSetup.startReminder {
 				continue
 			}
-			// TEST:
-			// if daysSinceCreation < 5 {
-			// 	continue
-			// }
 
 			api, err := getApi(db, pr.TeamId)
 			if err != nil {
@@ -51,9 +73,7 @@ func startReminderSystem(db *sql.DB) {
 
 			var mentionUsers []string
 
-			// After 3 days, mention everyone
-			if daysSinceCreation >= 3 {
-				// TEST: if daysSinceCreation >= 20 {
+			if sinceCreation >= reminderSetup.channelReminder {
 				mentionUsers = []string{"<!channel>"}
 			} else {
 				// Get users who reacted with eyes
@@ -88,9 +108,7 @@ func startReminderSystem(db *sql.DB) {
 			text := fmt.Sprintf("🔔 *Reminder:* PR needs review\n<%s|Open PR>\n", pr.PRUrl)
 			if len(mentionUsers) > 0 {
 				text += "Hey " + strings.Join(mentionUsers, ", ") + "! "
-				if daysSinceCreation >= 3 {
-					// TEST:
-					// if daysSinceCreation >= 10 {
+				if sinceCreation >= reminderSetup.channelReminder {
 					text += "This PR has been waiting for review for 3+ days."
 				} else {
 					text += "This PR is awaiting your review."
@@ -109,5 +127,5 @@ func startReminderSystem(db *sql.DB) {
 		}
 	})
 
-	s.Start()
+	reminderSetup.scheduler.Start()
 }

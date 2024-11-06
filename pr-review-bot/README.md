@@ -12,6 +12,7 @@ First you need to create a Slack app and set it up properly:
 
 1. Create a Slack App: https://api.slack.com/apps
 2. Copy `example.env` file and fill the required secrets
+    - Set `GO_ENV` to anything other than "prod" to get shorter duration to running the scheduler
 3. Run the app: `go run .`
 4. Go to app's page and do the following:
     - In OAuth & Permissions section:
@@ -24,3 +25,7 @@ First you need to create a Slack app and set it up properly:
     - Enable "Event Subscriptions:
         - Request URL: `https://your-host.com/slack/events`
         - Add "reaction_added" in "Subscribe to bot events"
+
+## TODO
+- [ ] Add rate limiter
+
