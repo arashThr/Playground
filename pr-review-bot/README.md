@@ -6,6 +6,9 @@ You will have your PR link with description and candidates to review the PR.
 After publishing the message, in case the PR is not reviewed for a day (By reacting ✅ to the message), the app will remind the candidates, or people who have started reviewing the PR (by putting 👀 emoji on the initial message) that they need to check the PR.
 Finally, on third day, the whole channel is mentioned for reviewing the PR.
 
+Here's how it looks like:
+![Screen shot of Slack messages](screenshot.png)
+
 ## Setting up the app
 
 First you need to create a Slack app and set it up properly:
