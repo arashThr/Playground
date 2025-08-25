@@ -1,16 +1,4 @@
-/*
-Challenge 3: Concurrent URL Fetcher with Worker Pool
-Problem: Build a concurrent HTTP client that fetches multiple URLs using a worker pool pattern with proper error handling and timeouts.
-Topics:
-- Proper context handling - Using context.WithCancel() and propagating to HTTP requests
-- WaitGroup usage - Correctly coordinating worker shutdown
-- Channel lifecycle management - Closing jobs and results channels properly
-- Buffered channels - Preventing goroutine blocking
-- Select statement with context - Proper cancellation handling
-- Worker pool pattern - Clean implementation of the pattern
-*/
-
-package challenges
+package pool
 
 import (
 	"context"

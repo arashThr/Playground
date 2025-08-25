@@ -1,4 +1,4 @@
-package challenges
+package lru
 
 import (
 	"container/list"

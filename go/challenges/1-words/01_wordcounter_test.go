@@ -1,4 +1,4 @@
-package challenges
+package words
 
 import (
 	"fmt"

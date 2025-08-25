@@ -1,4 +1,4 @@
-package challenges
+package stack
 
 import (
 	"errors"
