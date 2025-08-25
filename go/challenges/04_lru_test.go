@@ -1,7 +1,10 @@
 package challenges
 
 import (
+	"container/list"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -30,8 +33,6 @@ func TestLRUBasicOperations(t *testing.T) {
 	if val, ok := cache.Get("a"); !ok || val != 1 {
 		t.Error("Expected 'a' to still be in cache")
 	}
-
-	cache.Iterate()
 }
 
 func TestLRUTTL(t *testing.T) {
@@ -90,139 +91,151 @@ type CacheStats struct {
 	Expirations int64
 }
 
-type cacheItem[V any] struct {
+type atomicStats struct {
+	Hits        atomic.Int64
+	Misses      atomic.Int64
+	Evictions   atomic.Int64
+	Expirations atomic.Int64
+}
+
+type LRUCache[K comparable, V any] struct {
+	mu       sync.RWMutex
+	capacity int
+	lru      *list.List
+	items    map[K]*list.Element
+	stats    atomicStats
+	ticker   *time.Ticker
+	done     chan bool
+}
+
+type Entry[K comparable, V any] struct {
+	key       K
 	value     V
 	expiresAt time.Time
 }
 
-type LRUCache[K comparable, V any] struct {
-	head     *Node[K, V]
-	capacity int
-	list     map[K]*Node[K, V]
-	stats    CacheStats
-}
-
-type Node[K comparable, V any] struct {
-	next *Node[K, V]
-	prev *Node[K, V]
-	key  K
-	ttl  time.Duration
-	item cacheItem[V]
-}
-
 func NewLRUCache[K comparable, V any](capacity int) *LRUCache[K, V] {
-	if capacity < 2 {
-		fmt.Printf("Capacity must be at least 2, got %d\n", capacity)
-		return nil
-	}
+	t := time.NewTicker(10 * time.Second)
 	cache := LRUCache[K, V]{
-		head:     nil,
 		capacity: capacity,
-		list:     make(map[K]*Node[K, V]),
-		stats:    CacheStats{},
+		lru:      list.New(),
+		items:    make(map[K]*list.Element),
+		ticker:   t,
+		done:     make(chan bool),
 	}
+	go cache.cleanUp()
 	return &cache
 }
 
-func (c *LRUCache[K, V]) Set(key K, value V, ttl time.Duration) {
-	var node Node[K, V]
-	if oldItem, exists := c.list[key]; exists {
-		node = *oldItem
-	} else {
-		fmt.Printf("Adding new key: %v - Size: %d - Cap: %d\n", key, len(c.list), c.capacity)
-		if len(c.list) >= c.capacity {
-			var t *Node[K, V]
-			// t will be the tail
-			for t = c.head; t.next != nil; t = t.next {
-				// fmt.Printf("Traversing: %v\n", t.key)
-				// time.Sleep(time.Second)
+func (c *LRUCache[K, V]) cleanUp() {
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-c.ticker.C:
+			// Once a ticker is stopped it won’t receive any more values on its channel
+			c.mu.Lock()
+			now := time.Now()
+			for k, v := range c.items {
+				el := c.getEntry(v)
+				if el.expiresAt.Before(now) {
+					c.stats.Expirations.Add(1)
+					c.deleteUnlocked(k)
+				}
 			}
-			// Question: How to make sure memory is freed
-			c.Delete(t.key)
-			c.stats.Evictions += 1
+			c.mu.Unlock()
 		}
-		node = Node[K, V]{key: key}
 	}
-	node.ttl = ttl
-	node.item = cacheItem[V]{value: value, expiresAt: time.Now().Add(ttl)}
-	c.moveToHead(&node)
+}
+
+func (c *LRUCache[K, V]) Set(key K, value V, ttl time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	el, found := c.items[key]
+	if found {
+		e := c.getEntry(el)
+		e.expiresAt = time.Now().Add(ttl)
+		e.value = value
+		c.lru.MoveToFront(el)
+		return
+	}
+	if len(c.items) >= c.capacity {
+		el := c.lru.Back()
+		key := el.Value.(*Entry[K, V]).key
+		c.stats.Evictions.Add(1)
+		c.deleteUnlocked(key)
+	}
+	entry := &Entry[K, V]{
+		key:       key,
+		value:     value,
+		expiresAt: time.Now().Add(ttl),
+	}
+	el = c.lru.PushFront(entry)
+	c.items[key] = el
 }
 
 func (c *LRUCache[K, V]) Iterate() {
-	for i := c.head; i != nil; i = i.next {
-		fmt.Printf("%v -> %v - %v\n", i.key, i.item.value, i.item.expiresAt.Format(time.RFC3339))
+	for e := c.lru.Front(); e != nil; e = e.Next() {
+		fmt.Printf("%v\n", c.getEntry(e).key)
 	}
-}
-
-func (c *LRUCache[K, V]) moveToHead(node *Node[K, V]) {
-	var head *Node[K, V]
-	prev := node.prev
-	next := node.next
-	fmt.Printf("Moving to head: %v\n", node.key)
-	if c.head != nil {
-		if c.head.key == node.key {
-			return
-		}
-		head = c.head
-		head.prev = node
-	}
-	if next != nil {
-		next.prev = prev
-	}
-	if prev != nil {
-		prev.next = next
-	}
-	node.next = head
-	node.prev = nil
-	c.head = node
-	c.list[node.key] = node
 }
 
 func (c *LRUCache[K, V]) Get(key K) (V, bool) {
-	fmt.Printf("Getting key: %v\n", key)
-	var value V
-	node, found := c.list[key]
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var v V
+	el, found := c.items[key]
 	if found {
-		expired := node.item.expiresAt.Before(time.Now())
-		if expired {
-			c.Delete(key)
-			c.stats.Expirations += 1
-			return value, false
+		e := c.getEntry(el)
+		if e.expiresAt.Before(time.Now()) {
+			c.deleteUnlocked(key)
+			c.stats.Expirations.Add(1)
+			c.stats.Misses.Add(1)
+			return v, false
 		}
-		// No need to update TTL
-		value = node.item.value
-		c.moveToHead(node)
-		c.stats.Hits += 1
-	} else {
-		c.stats.Misses += 1
+		v = e.value
+		c.lru.MoveToFront(el)
+		c.stats.Hits.Add(1)
+		return v, true
 	}
-	return value, found
+	c.stats.Misses.Add(1)
+	return v, false
+}
+
+func (c *LRUCache[K, V]) getEntry(el *list.Element) *Entry[K, V] {
+	e, ok := el.Value.(*Entry[K, V])
+	if !ok {
+		panic("unexpected type in LRU list")
+	}
+	return e
 }
 
 func (c *LRUCache[K, V]) Delete(key K) bool {
-	fmt.Printf("Deleting key: %v\n", key)
-	node, found := c.list[key]
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.deleteUnlocked(key)
+}
+
+func (c *LRUCache[K, V]) deleteUnlocked(key K) bool {
+	el, found := c.items[key]
 	if !found {
 		return false
 	}
-	// Don't forget to update the head!
-	if c.head == node {
-		c.head = node.next
-	}
-	if node.prev != nil {
-		node.prev.next = node.next
-	}
-	if node.next != nil {
-		node.next.prev = node.prev
-	}
-	delete(c.list, key)
+	c.lru.Remove(el)
+	delete(c.items, key)
 	return true
 }
 
 func (c *LRUCache[K, V]) GetStats() CacheStats {
-	return c.stats
+	return CacheStats{
+		Hits:        c.stats.Hits.Load(),
+		Misses:      c.stats.Misses.Load(),
+		Evictions:   c.stats.Evictions.Load(),
+		Expirations: c.stats.Expirations.Load(),
+	}
 }
 
 func (c *LRUCache[K, V]) Close() {
-
+	c.ticker.Stop()
+	c.done <- true
 }
