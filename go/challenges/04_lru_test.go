@@ -34,52 +34,52 @@ func TestLRUBasicOperations(t *testing.T) {
 	cache.Iterate()
 }
 
-// func TestLRUTTL(t *testing.T) {
-// 	cache := NewLRUCache[string, int](5)
-// 	defer cache.Close()
+func TestLRUTTL(t *testing.T) {
+	cache := NewLRUCache[string, int](5)
+	defer cache.Close()
 
-// 	// Set with short TTL
-// 	cache.Set("short", 100, 50*time.Millisecond)
-// 	cache.Set("long", 200, time.Hour)
+	// Set with short TTL
+	cache.Set("short", 100, 50*time.Millisecond)
+	cache.Set("long", 200, time.Hour)
 
-// 	// Should be available immediately
-// 	if val, ok := cache.Get("short"); !ok || val != 100 {
-// 		t.Error("Expected short-lived item to be available immediately")
-// 	}
+	// Should be available immediately
+	if val, ok := cache.Get("short"); !ok || val != 100 {
+		t.Error("Expected short-lived item to be available immediately")
+	}
 
-// 	// Wait for TTL expiration
-// 	time.Sleep(100 * time.Millisecond)
+	// Wait for TTL expiration
+	time.Sleep(100 * time.Millisecond)
 
-// 	if _, ok := cache.Get("short"); ok {
-// 		t.Error("Expected short-lived item to be expired")
-// 	}
+	if _, ok := cache.Get("short"); ok {
+		t.Error("Expected short-lived item to be expired")
+	}
 
-// 	if val, ok := cache.Get("long"); !ok || val != 200 {
-// 		t.Error("Expected long-lived item to still be available")
-// 	}
-// }
+	if val, ok := cache.Get("long"); !ok || val != 200 {
+		t.Error("Expected long-lived item to still be available")
+	}
+}
 
-// func TestLRUStats(t *testing.T) {
-// 	cache := NewLRUCache[string, int](2)
-// 	defer cache.Close()
+func TestLRUStats(t *testing.T) {
+	cache := NewLRUCache[string, int](2)
+	defer cache.Close()
 
-// 	cache.Set("a", 1, time.Hour)
-// 	cache.Get("a")       // hit
-// 	cache.Get("missing") // miss
-// 	cache.Set("b", 2, time.Hour)
-// 	cache.Set("c", 3, time.Hour) // should evict "a"
+	cache.Set("a", 1, time.Hour)
+	cache.Get("a")       // hit
+	cache.Get("missing") // miss
+	cache.Set("b", 2, time.Hour)
+	cache.Set("c", 3, time.Hour) // should evict "a"
 
-// 	stats := cache.GetStats()
-// 	if stats.Hits != 1 {
-// 		t.Errorf("Expected 1 hit, got %d", stats.Hits)
-// 	}
-// 	if stats.Misses != 1 {
-// 		t.Errorf("Expected 1 miss, got %d", stats.Misses)
-// 	}
-// 	if stats.Evictions != 1 {
-// 		t.Errorf("Expected 1 eviction, got %d", stats.Evictions)
-// 	}
-// }
+	stats := cache.GetStats()
+	if stats.Hits != 1 {
+		t.Errorf("Expected 1 hit, got %d", stats.Hits)
+	}
+	if stats.Misses != 1 {
+		t.Errorf("Expected 1 miss, got %d", stats.Misses)
+	}
+	if stats.Evictions != 1 {
+		t.Errorf("Expected 1 eviction, got %d", stats.Evictions)
+	}
+}
 
 /* --------------- IMPLEMENTATION ------------------*/
 
@@ -99,11 +99,7 @@ type LRUCache[K comparable, V any] struct {
 	head     *Node[K, V]
 	capacity int
 	list     map[K]*Node[K, V]
-	// Your fields here - think about what you need for:
-	// - LRU ordering (hint: doubly linked list + map)
-	// - Thread safety
-	// - TTL cleanup
-	// - Metrics
+	stats    CacheStats
 }
 
 type Node[K comparable, V any] struct {
@@ -123,6 +119,7 @@ func NewLRUCache[K comparable, V any](capacity int) *LRUCache[K, V] {
 		head:     nil,
 		capacity: capacity,
 		list:     make(map[K]*Node[K, V]),
+		stats:    CacheStats{},
 	}
 	return &cache
 }
@@ -134,14 +131,15 @@ func (c *LRUCache[K, V]) Set(key K, value V, ttl time.Duration) {
 	} else {
 		fmt.Printf("Adding new key: %v - Size: %d - Cap: %d\n", key, len(c.list), c.capacity)
 		if len(c.list) >= c.capacity {
-			// Clean up the list
 			var t *Node[K, V]
 			// t will be the tail
 			for t = c.head; t.next != nil; t = t.next {
+				// fmt.Printf("Traversing: %v\n", t.key)
+				// time.Sleep(time.Second)
 			}
 			// Question: How to make sure memory is freed
-			t.prev.next = nil
-			delete(c.list, t.key)
+			c.Delete(t.key)
+			c.stats.Evictions += 1
 		}
 		node = Node[K, V]{key: key}
 	}
@@ -162,6 +160,9 @@ func (c *LRUCache[K, V]) moveToHead(node *Node[K, V]) {
 	next := node.next
 	fmt.Printf("Moving to head: %v\n", node.key)
 	if c.head != nil {
+		if c.head.key == node.key {
+			return
+		}
 		head = c.head
 		head.prev = node
 	}
@@ -180,23 +181,47 @@ func (c *LRUCache[K, V]) moveToHead(node *Node[K, V]) {
 func (c *LRUCache[K, V]) Get(key K) (V, bool) {
 	fmt.Printf("Getting key: %v\n", key)
 	var value V
-	var node *Node[K, V]
-	found := false
-	if node, found = c.list[key]; found {
-		node.item.expiresAt = time.Now().Add(node.ttl)
+	node, found := c.list[key]
+	if found {
+		expired := node.item.expiresAt.Before(time.Now())
+		if expired {
+			c.Delete(key)
+			c.stats.Expirations += 1
+			return value, false
+		}
+		// No need to update TTL
 		value = node.item.value
 		c.moveToHead(node)
+		c.stats.Hits += 1
+	} else {
+		c.stats.Misses += 1
 	}
 	return value, found
 }
 
-// func (c *LRUCache[K, V]) Delete(key K) bool {
+func (c *LRUCache[K, V]) Delete(key K) bool {
+	fmt.Printf("Deleting key: %v\n", key)
+	node, found := c.list[key]
+	if !found {
+		return false
+	}
+	// Don't forget to update the head!
+	if c.head == node {
+		c.head = node.next
+	}
+	if node.prev != nil {
+		node.prev.next = node.next
+	}
+	if node.next != nil {
+		node.next.prev = node.prev
+	}
+	delete(c.list, key)
+	return true
+}
 
-// }
-
-// func (c *LRUCache[K, V]) GetStats() CacheStats {
-
-// }
+func (c *LRUCache[K, V]) GetStats() CacheStats {
+	return c.stats
+}
 
 func (c *LRUCache[K, V]) Close() {
 
