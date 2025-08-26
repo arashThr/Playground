@@ -48,6 +48,12 @@ func TestBSTTraversals(t *testing.T) {
 	if !slices.Equal(preOrder, expectedPre) {
 		t.Errorf("PreOrder expected %v, got %v", expectedPre, preOrder)
 	}
+
+	postOrder := bst.PostOrder()
+	expectedPost := []int{1, 3, 9, 7, 5}
+	if !slices.Equal(postOrder, expectedPost) {
+		t.Errorf("PostOrder expected %v, got %v", expectedPost, postOrder)
+	}
 }
 
 func TestBSTJSON(t *testing.T) {
@@ -70,6 +76,10 @@ func TestBSTJSON(t *testing.T) {
 
 	if !slices.Equal(bst.InOrder(), newBST.InOrder()) {
 		t.Error("Unmarshaled tree should match original")
+	}
+	// Check size
+	if bst.Size() != newBST.Size() {
+		t.Errorf("Expected size %d, got %d", bst.Size(), newBST.Size())
 	}
 }
 
@@ -158,14 +168,11 @@ func (bst *BST[T]) Height() int {
 
 func (bst *BST[T]) height(node *Node[T], height int) int {
 	if node == nil {
-		return height
+		return 0
 	}
-	maxLeft := bst.height(node.Left, height+1)
-	maxRight := bst.height(node.Right, height+1)
-	if maxLeft > maxRight {
-		return maxLeft
-	}
-	return maxRight
+	leftHeight := bst.height(node.Left, height+1)
+	rightHeight := bst.height(node.Right, height+1)
+	return 1 + max(leftHeight, rightHeight)
 }
 
 func (bst *BST[T]) InOrder() []T {
@@ -196,6 +203,20 @@ func (bst *BST[T]) preOrder(node *Node[T], list []T) []T {
 	return list
 }
 
+func (bst *BST[T]) PostOrder() []T {
+	return bst.postOrder(bst.Root, []T{})
+}
+
+func (bst *BST[T]) postOrder(node *Node[T], list []T) []T {
+	if node == nil {
+		return list
+	}
+	list = bst.postOrder(node.Left, list)
+	list = bst.postOrder(node.Right, list)
+	list = append(list, node.Value)
+	return list
+}
+
 func (bst *BST[T]) TraverseTree(message string) {
 	fmt.Println(message)
 	bst.print(bst.Root)
@@ -211,16 +232,8 @@ func (bst *BST[T]) print(node *Node[T]) {
 	bst.print(node.Right)
 }
 
-type SerializedTree struct {
-	Tree string
-	Size int
-}
-
 func (bst *BST[T]) MarshalJSON() ([]byte, error) {
-	serialized := SerializedTree{
-		Tree: bst.marshalJSON(bst.Root),
-		Size: bst.Size(),
-	}
+	serialized := bst.marshalJSON(bst.Root)
 	result, err := json.Marshal(serialized)
 	if err != nil {
 		return nil, fmt.Errorf("marshal BST: %v", err)
@@ -237,12 +250,12 @@ func (bst *BST[T]) marshalJSON(node *Node[T]) string {
 }
 
 func (bst *BST[T]) UnmarshalJSON(input []byte) error {
-	var serialized SerializedTree
+	var serialized string
 	err := json.Unmarshal(input, &serialized)
 	if err != nil {
 		return fmt.Errorf("unmarshal BST: %v", err)
 	}
-	fields := strings.Fields(serialized.Tree)
+	fields := strings.Fields(serialized)
 	bst.Root, _, err = bst.unmarshalJSON(fields)
 	if err != nil {
 		return fmt.Errorf("unmarshal tree: %v", err)
@@ -277,27 +290,25 @@ func (bst *BST[T]) unmarshalJSON(values []string) (*Node[T], []string, error) {
 		return nil, rest, fmt.Errorf("unmarshal right child of %v: %v", t, err)
 	}
 	node.Right = right
+	bst.TreeSize += 1
 	return node, rest, nil
 }
 
 func (bst *BST[T]) IsValid() bool {
-	if bst.Root == nil {
-		return true
-	}
-	// or I could do pre-order traverse and check if the result is sorted
-	return bst.isBigger(bst.Root, bst.Root.Left) && bst.isSmaller(bst.Root, bst.Root.Right)
+	var zero T
+	return bst.isValid(bst.Root, zero, zero, false, false)
 }
 
-func (bst *BST[T]) isBigger(node, left *Node[T]) bool {
-	if left == nil {
+func (bst *BST[T]) isValid(node *Node[T], min, max T, hasMin, hasMax bool) bool {
+	if node == nil {
 		return true
 	}
-	return node.Value > left.Value && bst.isBigger(node, left.Left) && bst.isBigger(node, left.Right) && bst.isBigger(left, left.Left) && bst.isSmaller(left, left.Right)
+
+	if (hasMin && node.Value <= min) || (hasMax && node.Value >= max) {
+		return false
+	}
+
+	return bst.isValid(node.Left, min, node.Value, hasMin, true) && bst.isValid(node.Right, node.Value, max, true, hasMax)
 }
 
-func (bst *BST[T]) isSmaller(node, right *Node[T]) bool {
-	if right == nil {
-		return true
-	}
-	return node.Value < right.Value && bst.isSmaller(node, right.Left) && bst.isSmaller(node, right.Right) && bst.isBigger(right, right.Left) && bst.isSmaller(right, right.Right)
-}
+// TODO: Implement Delete
